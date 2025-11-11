@@ -1,0 +1,128 @@
+{
+  "version": "1.0",
+  "compiler_version": "1.0.0",
+  "registry_versions": {
+    "assets": "2025-01-01",
+    "indicators": "2025-01-01",
+    "timeframes": "2025-01-01"
+  },
+  "defaults_version": "2025-01-01",
+  "meta": {
+    "name": "SMA Crossover Strategy",
+    "description": "Buy when fast SMA crosses above slow SMA, sell when it crosses below",
+    "created_at": "2025-01-15T00:00:00.000000Z"
+  },
+  "settings": {},
+  "scopes": [
+    {
+      "instrument": {
+        "symbol": "BTCUSDC",
+        "coin": "BTC",
+        "venue": "HYPERLIQUID_PERP",
+        "timeframe": "tick"
+      },
+      "indicators": [
+        {
+          "id": "sma_fast",
+          "type": "SMA",
+          "params": {
+            "length": 10.0
+          },
+          "outputs": ["value"]
+        },
+        {
+          "id": "sma_slow",
+          "type": "SMA",
+          "params": {
+            "length": 20.0
+          },
+          "outputs": ["value"]
+        }
+      ],
+      "graph": {
+        "entry": "check_crossover",
+        "nodes": {
+          "check_crossover": {
+            "type": "condition",
+            "expr": {
+              "op": ">",
+              "lhs": {
+                "ref": "sma_fast.value"
+              },
+              "rhs": {
+                "ref": "sma_slow.value"
+              }
+            },
+            "true": "check_buy",
+            "false": "check_sell"
+          },
+          "check_buy": {
+            "type": "condition",
+            "expr": {
+              "op": ">",
+              "lhs": {
+                "ref": "sma_fast.value"
+              },
+              "rhs": {
+                "ref": "sma_slow.value"
+              }
+            },
+            "true": "buy_signal",
+            "false": "end"
+          },
+          "check_sell": {
+            "type": "condition",
+            "expr": {
+              "op": "<",
+              "lhs": {
+                "ref": "sma_fast.value"
+              },
+              "rhs": {
+                "ref": "sma_slow.value"
+              }
+            },
+            "true": "sell_signal",
+            "false": "end"
+          },
+          "buy_signal": {
+            "type": "action",
+            "action": {
+              "kind": "BUY",
+              "symbol": "BTCUSDC",
+              "sizing": {
+                "mode": "cash",
+                "value": 1000.0
+              },
+              "order": {
+                "type": "MARKET"
+              }
+            },
+            "guards": [],
+            "next": "end"
+          },
+          "sell_signal": {
+            "type": "action",
+            "action": {
+              "kind": "SELL",
+              "symbol": "BTCUSDC",
+              "sizing": {
+                "mode": "pct",
+                "value": 100.0
+              },
+              "order": {
+                "type": "MARKET"
+              }
+            },
+            "guards": [],
+            "next": "end"
+          },
+          "end": {
+            "type": "terminal"
+          }
+        }
+      }
+    }
+  ],
+  "ir_hash": "sha256:sma_crossover_strategy"
+}
+
