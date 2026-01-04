@@ -7,6 +7,10 @@ pub struct CompiledStrategy {
     pub indicators: Vec<CompiledIndicator>,
     pub entry_node: String,
     pub nodes: std::collections::HashMap<String, Node>,
+    /// Exit graph entry node (None if no exit graph provided)
+    pub exit_entry_node: Option<String>,
+    /// Exit graph nodes (None if no exit graph provided)
+    pub exit_nodes: Option<std::collections::HashMap<String, Node>>,
 }
 
 pub struct CompiledIndicator {
@@ -49,5 +53,7 @@ pub fn compile_strategy(ir: &StrategyIr) -> Result<CompiledStrategy> {
         indicators: compiled_indicators,
         entry_node: scope.graph.entry.clone(),
         nodes: scope.graph.nodes.clone(),
+        exit_entry_node: scope.exit_graph.as_ref().map(|g| g.entry.clone()),
+        exit_nodes: scope.exit_graph.as_ref().map(|g| g.nodes.clone()),
     })
 }

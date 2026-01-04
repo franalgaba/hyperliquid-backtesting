@@ -32,7 +32,7 @@ PerpsExecution
 **Responsibilities**:
 - Loading and processing L2 events
 - Maintaining order book state
-- Evaluating strategies
+- Evaluating strategies (entry and exit graphs)
 - Executing orders
 - Tracking portfolio state
 - Recording results
@@ -40,6 +40,9 @@ PerpsExecution
 **Key Design Decisions**:
 - **Event-driven**: Processes events sequentially to maintain temporal accuracy
 - **Order book reconstruction**: Rebuilds book from snapshots (doesn't modify after execution)
+- **Dual-graph evaluation**: 
+  - Entry graph evaluated when flat (no position) - subject to cooldown
+  - Exit graph evaluated when in position - bypasses cooldown for prompt exits
 - **Strategy throttling**: Only evaluates on significant price changes (0.01% threshold)
 - **Parallel I/O**: File loading is parallelized for performance
 
@@ -88,6 +91,31 @@ PerpsExecution
 - `execute_trade()`: Update cash and positions
 - `total_equity()`: Calculate total portfolio value
 - `get_position_value()`: Get position notional value
+
+### Strategy Evaluation
+
+**Purpose**: Executes strategy graphs based on market conditions and position state.
+
+**Graph Types**:
+- **Entry Graph**: Evaluated when portfolio is flat (no position)
+  - Creates BUY/SELL orders to open positions
+  - Subject to trade cooldown (configurable, default 15 minutes)
+  - Only evaluated when price changes exceed threshold (0.01%)
+- **Exit Graph**: Evaluated when portfolio has a position
+  - Creates CLOSE orders or opposite-side orders to exit positions
+  - Bypasses cooldown for prompt exit execution
+  - Evaluated on every price change (no throttling)
+
+**Evaluation Flow**:
+1. Check current position size
+2. If flat → evaluate entry graph (if cooldown allows)
+3. If in position → evaluate exit graph (immediate, no cooldown)
+4. Execute any orders created by graph evaluation
+
+**Design Rationale**:
+- Entry cooldown prevents excessive trading on small price movements
+- Exit bypass ensures positions can be closed promptly when conditions are met
+- Position-based evaluation ensures correct graph is used at the right time
 
 ### FundingSchedule
 

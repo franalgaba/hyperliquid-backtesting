@@ -142,6 +142,11 @@ pub enum Commands {
             /// Enable parallel indicator updates (default: true in release, false in debug)
             #[arg(long)]
             indicators_par: Option<bool>,
+            /// Trade cooldown period in minutes (minimum time between trades)
+            /// Prevents excessive trading when strategy triggers frequently
+            /// Default: 15 minutes
+            #[arg(long)]
+            trade_cooldown_min: Option<u64>,
             /// Output file path (JSON)
             #[arg(long, default_value = "results.json")]
             out: PathBuf,
@@ -271,6 +276,7 @@ impl Cli {
                     maker_fee_bps,
                     taker_fee_bps,
                     slippage_bps,
+                    trade_cooldown_ms: None, // Not used in candle-based backtest
                 };
 
                 let result = simulate(&candles, &strategy_ir, &config).await?;
@@ -371,6 +377,7 @@ impl Cli {
                     taker_fee_bps,
                     io_concurrency,
                     indicators_par,
+                    trade_cooldown_min,
                     out,
                 } => {
                 validate_asset(&coin)?;
@@ -423,6 +430,7 @@ impl Cli {
                     maker_fee_bps,
                     taker_fee_bps,
                     slippage_bps: 0, // Slippage handled by order book depth
+                    trade_cooldown_ms: trade_cooldown_min.map(|min| min * 60 * 1000), // Convert minutes to milliseconds
                 };
 
                 // Default indicators_par: true in release, false in debug

@@ -21,6 +21,10 @@ pub struct Scope {
     pub instrument: Instrument,
     pub indicators: Vec<IndicatorSpec>,
     pub graph: Graph,
+    /// Exit graph for closing positions. Required for complete strategies.
+    /// When in a position, the engine evaluates this graph instead of the entry graph.
+    #[serde(rename = "exit_graph")]
+    pub exit_graph: Option<Graph>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

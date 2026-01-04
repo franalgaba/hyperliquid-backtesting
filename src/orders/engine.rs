@@ -69,15 +69,38 @@ pub async fn simulate(
             evaluator.update(candle)?;
         }
 
-        // Evaluate strategy graph
-        evaluate_strategy(
-            &compiled,
-            &indicators,
-            candle,
-            &mut active_orders,
-            &mut next_order_id,
-            &portfolio,
-        )?;
+        // Determine which graph to evaluate based on position
+        let position_size = portfolio.get_position(&candle.coin);
+        let is_flat = position_size.abs() < 1e-10;
+        
+        if is_flat {
+            // Flat position: evaluate entry graph
+            evaluate_graph(
+                &compiled.entry_node,
+                &compiled.nodes,
+                &compiled,
+                &indicators,
+                candle,
+                &mut active_orders,
+                &mut next_order_id,
+                &portfolio,
+            )?;
+        } else {
+            // In position: evaluate exit graph
+            if let (Some(exit_entry), Some(exit_nodes)) = 
+                (&compiled.exit_entry_node, &compiled.exit_nodes) {
+                evaluate_graph(
+                    exit_entry,
+                    exit_nodes,
+                    &compiled,
+                    &indicators,
+                    candle,
+                    &mut active_orders,
+                    &mut next_order_id,
+                    &portfolio,
+                )?;
+            }
+        }
 
         // Process active orders
         let mut orders_to_remove = Vec::new();
@@ -170,7 +193,10 @@ pub async fn simulate(
     })
 }
 
-fn evaluate_strategy(
+/// Evaluate a graph (entry or exit) for candle-based backtesting
+fn evaluate_graph(
+    entry_node: &str,
+    nodes: &std::collections::HashMap<String, crate::ir::types::Node>,
     compiled: &crate::ir::compile::CompiledStrategy,
     indicators: &HashMap<String, Box<dyn IndicatorEvaluator>>,
     candle: &Candle,
@@ -178,11 +204,12 @@ fn evaluate_strategy(
     next_order_id: &mut u64,
     portfolio: &Portfolio,
 ) -> Result<()> {
-    let mut current_node = &compiled.entry_node;
+    use crate::ir::types::Node;
+    
+    let mut current_node = entry_node;
 
     loop {
-        let node = compiled
-            .nodes
+        let node = nodes
             .get(current_node)
             .ok_or_else(|| anyhow::anyhow!("Node not found: {}", current_node))?;
 

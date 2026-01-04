@@ -41,6 +41,8 @@ PerpsEngine
 - **L2 Events**: Order book snapshots containing bid/ask levels
 - **Synthetic Candles**: Price data derived from order book mid-price
 - **Strategy Evaluation**: Graph-based strategy execution on price changes
+  - **Entry Graph**: Evaluated when flat (no position) - subject to cooldown
+  - **Exit Graph**: Evaluated when in position - bypasses cooldown for prompt exits
 - **Order Execution**: Market orders execute immediately, limit orders wait for fills
 
 ### Public API

@@ -2,8 +2,6 @@
 
 High-performance Rust backtester for Hyperliquid trading strategies.
 
-**This is a Rust Cargo package** - see the [main README](../README.md) for project structure.
-
 ## Building
 
 ```bash

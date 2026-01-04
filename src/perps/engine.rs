@@ -329,6 +329,18 @@ impl PerpsEngine {
 
         // Performance optimization: Track last price to skip strategy evaluation when price hasn't changed
         let mut last_evaluated_price = 0.0;
+        
+        // Parse timeframe from strategy to track candle boundaries for percentage drop detection
+        // This ensures we compare against the previous candle's close, not the previous tick
+        let timeframe_ms = parse_timeframe_to_ms(&compiled.instrument.timeframe)
+            .unwrap_or(60 * 1000); // Default to 1 minute if parsing fails
+        let mut prev_candle_close: Option<f64> = None;
+        let mut current_candle_start_ts: Option<u64> = None;
+        
+        // Cooldown mechanism: Prevent excessive trades by requiring minimum time between trades
+        // Default: 15 minutes cooldown (900 seconds = 900,000 ms) if not specified
+        let trade_cooldown_ms = config.trade_cooldown_ms.unwrap_or(15 * 60 * 1000);
+        let mut last_trade_ts: Option<u64> = None;
 
         // Process events
         let total_events = all_events.len();
@@ -398,11 +410,28 @@ impl PerpsEngine {
             };
 
             // Update synthetic candle in-place (avoid allocation)
-            synthetic_candle.time_open = *ts_ms;
+            // Track candle boundaries based on strategy timeframe for percentage drop detection
+            let candle_start_ts = (*ts_ms / timeframe_ms) * timeframe_ms;
+            let is_new_candle = current_candle_start_ts.map(|ts| ts != candle_start_ts).unwrap_or(true);
+            
+            if is_new_candle {
+                // New candle started: store previous candle's close BEFORE updating
+                // This ensures we capture the final close price of the previous candle
+                if current_candle_start_ts.is_some() && synthetic_candle.close > 0.0 {
+                    // Only store if we had a previous candle (not the first candle ever)
+                    prev_candle_close = Some(synthetic_candle.close);
+                }
+                current_candle_start_ts = Some(candle_start_ts);
+                // Reset candle OHLC for new candle
+                synthetic_candle.time_open = candle_start_ts;
+                synthetic_candle.open = price;
+                synthetic_candle.high = price;
+                synthetic_candle.low = price;
+            }
+            
             synthetic_candle.time_close = *ts_ms;
-            synthetic_candle.open = price;
-            synthetic_candle.high = price;
-            synthetic_candle.low = price;
+            synthetic_candle.high = synthetic_candle.high.max(price);
+            synthetic_candle.low = synthetic_candle.low.min(price);
             synthetic_candle.close = price;
 
             // Update indicators (always needed to maintain rolling windows)
@@ -437,14 +466,47 @@ impl PerpsEngine {
                 event_idx >= max_lookback && (price_changed || last_evaluated_price == 0.0);
 
             if should_evaluate {
-                evaluate_strategy_perps(
-                    &compiled,
-                    &indicators,
-                    &synthetic_candle,
-                    &mut active_orders,
-                    &mut next_order_id,
-                    &engine.portfolio,
-                )?;
+                // Determine which graph to evaluate based on position
+                let coin_str = coin.to_string();
+                let position_size = engine.portfolio.get_position(&coin_str);
+                let is_flat = position_size.abs() < 1e-10;
+                
+                if is_flat {
+                    // Flat position: evaluate entry graph (subject to cooldown)
+                    let can_trade = last_trade_ts
+                        .map(|last_ts| *ts_ms >= last_ts + trade_cooldown_ms)
+                        .unwrap_or(true); // Allow first trade
+                    
+                    if can_trade {
+                        evaluate_graph_perps(
+                            &compiled.entry_node,
+                            &compiled.nodes,
+                            &compiled,
+                            &indicators,
+                            &synthetic_candle,
+                            prev_candle_close,
+                            &mut active_orders,
+                            &mut next_order_id,
+                            &engine.portfolio,
+                        )?;
+                    }
+                } else {
+                    // In position: evaluate exit graph (bypass cooldown for exits)
+                    if let (Some(exit_entry), Some(exit_nodes)) = 
+                        (&compiled.exit_entry_node, &compiled.exit_nodes) {
+                        evaluate_graph_perps(
+                            exit_entry,
+                            exit_nodes,
+                            &compiled,
+                            &indicators,
+                            &synthetic_candle,
+                            prev_candle_close,
+                            &mut active_orders,
+                            &mut next_order_id,
+                            &engine.portfolio,
+                        )?;
+                    }
+                }
                 last_evaluated_price = price;
             }
 
@@ -488,6 +550,9 @@ impl PerpsEngine {
                             &engine.fee_calc,
                             &mut trades,
                         );
+                        
+                        // Update cooldown timestamp
+                        last_trade_ts = Some(*ts_ms);
 
                         // Log partial fills for market orders
                         if fill_result.order_status == OrderStatus::PartiallyFilled {
@@ -564,6 +629,9 @@ impl PerpsEngine {
                         &engine.fee_calc,
                         &mut trades,
                     );
+                    
+                    // Update cooldown timestamp
+                    last_trade_ts = Some(*ts_ms);
 
                     // Note: order.filled_sz and order.action.sz are already updated by check_limit_fill
                     // The execution module handles partial fill tracking internally
@@ -625,22 +693,24 @@ impl PerpsEngine {
     }
 }
 
-/// Evaluate strategy graph for perps (similar to candle-based but uses synthetic candles)
-fn evaluate_strategy_perps(
+/// Evaluate a graph (entry or exit) for perps
+fn evaluate_graph_perps(
+    entry_node: &str,
+    nodes: &std::collections::HashMap<String, crate::ir::types::Node>,
     compiled: &crate::ir::compile::CompiledStrategy,
     indicators: &HashMap<String, Box<dyn IndicatorEvaluator>>,
     candle: &Candle,
+    prev_candle_close: Option<f64>,
     active_orders: &mut Vec<Order>,
     next_order_id: &mut u64,
     portfolio: &Portfolio,
 ) -> Result<()> {
     use crate::ir::types::Node;
 
-    let mut current_node = compiled.entry_node.clone();
+    let mut current_node = entry_node.to_string();
 
     loop {
-        let node = compiled
-            .nodes
+        let node = nodes
             .get(&current_node)
             .ok_or_else(|| anyhow::anyhow!("Node not found: {}", current_node))?;
 
@@ -650,7 +720,7 @@ fn evaluate_strategy_perps(
                 true_branch,
                 false_branch,
             } => {
-                let result = evaluate_expr_perps(expr, indicators, candle)?;
+                let result = evaluate_expr_perps(expr, indicators, candle, prev_candle_close)?;
                 current_node = if result {
                     true_branch.clone()
                 } else {
@@ -811,21 +881,84 @@ fn evaluate_expr_perps(
     expr: &crate::ir::types::Expr,
     indicators: &HashMap<String, Box<dyn IndicatorEvaluator>>,
     candle: &Candle,
+    prev_candle_close: Option<f64>,
 ) -> Result<bool> {
-    use crate::ir::types::ComparisonOp;
+    use crate::ir::types::{ComparisonOp, ExprValue};
 
-    let lhs_val = get_expr_value_perps(&expr.lhs, indicators, candle)?;
-    let rhs_val = get_expr_value_perps(&expr.rhs, indicators, candle)?;
+    // Diagnostic: Log expression structure (first time only)
+    static STRUCTURE_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !STRUCTURE_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        println!("  [STRATEGY DEBUG] Expression structure - LHS: {:?}, RHS: {:?}", expr.lhs, expr.rhs);
+    }
 
-    let result = match expr.op {
-        ComparisonOp::Lt => lhs_val < rhs_val,
-        ComparisonOp::Lte => lhs_val <= rhs_val,
-        ComparisonOp::Eq => (lhs_val - rhs_val).abs() < 1e-10,
-        ComparisonOp::Ne => (lhs_val - rhs_val).abs() >= 1e-10,
-        ComparisonOp::Gte => lhs_val >= rhs_val,
-        ComparisonOp::Gt => lhs_val > rhs_val,
-        ComparisonOp::CrossesAbove => lhs_val > rhs_val, // Simplified
-        ComparisonOp::CrossesBelow => lhs_val < rhs_val, // Simplified
+    // Special handling for percentage drop detection:
+    // If RHS is a small constant (like 2.0) and LHS is close price,
+    // interpret as "price dropped by 2%" by comparing to previous candle's close
+    // This is a workaround for the IR format limitation
+    let result = match (&expr.lhs, &expr.rhs) {
+        (ExprValue::Series { series: s }, ExprValue::Const { r#const: val })
+            if s == "close" && *val > 0.0 && *val < 100.0 =>
+        {
+            // Check if this looks like a percentage drop request
+            // If RHS is between 0-100, treat as percentage drop
+            // Use previous candle's close as reference (more intuitive than SMA)
+            let reference = prev_candle_close.unwrap_or(candle.close);
+            
+            // Check if price dropped by the specified percentage
+            let drop_pct = *val / 100.0; // Convert 2.0 to 0.02
+            let dropped = check_percentage_drop(candle.close, reference, drop_pct);
+            
+            // Diagnostic logging
+            static EVAL_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let count = EVAL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Log first 10, then every 1000th evaluation to see when prev_candle_close gets set
+            if count < 10 || (count > 0 && count % 1000 == 0) {
+                let ref_source = if prev_candle_close.is_some() { "prev_candle" } else { "current_candle" };
+                println!(
+                    "  [STRATEGY DEBUG] Percentage drop check #{}: close=${:.2}, ref=${:.2} ({}), drop_pct={:.2}%, dropped={}",
+                    count + 1,
+                    candle.close,
+                    reference,
+                    ref_source,
+                    drop_pct * 100.0,
+                    dropped
+                );
+            }
+            
+            dropped
+        }
+        _ => {
+            // Standard comparison logic
+            let lhs_val = get_expr_value_perps(&expr.lhs, indicators, candle)?;
+            let rhs_val = get_expr_value_perps(&expr.rhs, indicators, candle)?;
+            
+            let result = match expr.op {
+                ComparisonOp::Lt => lhs_val < rhs_val,
+                ComparisonOp::Lte => lhs_val <= rhs_val,
+                ComparisonOp::Eq => (lhs_val - rhs_val).abs() < 1e-10,
+                ComparisonOp::Ne => (lhs_val - rhs_val).abs() >= 1e-10,
+                ComparisonOp::Gte => lhs_val >= rhs_val,
+                ComparisonOp::Gt => lhs_val > rhs_val,
+                ComparisonOp::CrossesAbove => lhs_val > rhs_val, // Simplified
+                ComparisonOp::CrossesBelow => lhs_val < rhs_val, // Simplified
+            };
+            
+            // Diagnostic logging: Show condition evaluation (first 10 times)
+            static EVAL_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let count = EVAL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if count < 10 {
+                println!(
+                    "  [STRATEGY DEBUG] Standard comparison #{}: {} {:#?} {} => {}",
+                    count + 1,
+                    lhs_val,
+                    expr.op,
+                    rhs_val,
+                    result
+                );
+            }
+            
+            result
+        }
     };
 
     Ok(result)
@@ -862,6 +995,62 @@ fn get_expr_value_perps(
             "volume" => Ok(candle.volume),
             _ => anyhow::bail!("Unknown series: {}", series),
         },
+    }
+}
+
+/// Helper function to check if price dropped by a percentage from a reference value
+/// This enables percentage-based comparisons in strategies
+fn check_percentage_drop(current: f64, reference: f64, drop_pct: f64) -> bool {
+    if reference <= 0.0 {
+        return false;
+    }
+    let pct_change = (current - reference) / reference;
+    // pct_change is negative when price drops
+    // We want: pct_change <= -drop_pct (e.g., -0.02 for 2% drop)
+    // Which means: current <= reference * (1 - drop_pct)
+    let result = pct_change <= -drop_pct;
+    
+    // More detailed logging for debugging
+    static DETAILED_LOG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let log_count = DETAILED_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if log_count < 5 {
+        let actual_drop_pct = -pct_change * 100.0; // Convert to positive percentage
+        println!(
+            "    [DETAILED] current=${:.2}, ref=${:.2}, pct_change={:.4}%, required_drop={:.2}%, actual_drop={:.2}%, triggered={}",
+            current,
+            reference,
+            pct_change * 100.0,
+            drop_pct * 100.0,
+            actual_drop_pct,
+            result
+        );
+    }
+    
+    result
+}
+
+/// Parse timeframe string (e.g., "1h", "15m", "1d") to milliseconds
+fn parse_timeframe_to_ms(timeframe: &str) -> Option<u64> {
+    let s = timeframe.trim().to_lowercase();
+    if s.is_empty() {
+        return None;
+    }
+    
+    // Extract number and unit
+    let (num_str, unit) = if let Some(pos) = s.chars().position(|c| c.is_alphabetic()) {
+        (&s[..pos], &s[pos..])
+    } else {
+        return None;
+    };
+    
+    let num: u64 = num_str.parse().ok()?;
+    
+    match unit {
+        "m" | "min" | "minute" | "minutes" => Some(num * 60 * 1000),
+        "h" | "hour" | "hours" => Some(num * 60 * 60 * 1000),
+        "d" | "day" | "days" => Some(num * 24 * 60 * 60 * 1000),
+        "s" | "sec" | "second" | "seconds" => Some(num * 1000),
+        _ => None,
     }
 }
 
