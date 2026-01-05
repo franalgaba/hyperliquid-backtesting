@@ -151,7 +151,7 @@ impl PerpsEngine {
         let trade_cooldown_ms = config.trade_cooldown_ms.unwrap_or(15 * 60 * 1000);
         let mut last_trade_ts: Option<u64> = None;
 
-        let _total_events = all_events.len();
+        let total_events = all_events.len();
         let coin_str = coin.to_string();
 
         let mut synthetic_candle = Candle {
