@@ -20,6 +20,7 @@ pub struct L2Event {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct RawL2Entry {
     time: String,
     raw: RawData,

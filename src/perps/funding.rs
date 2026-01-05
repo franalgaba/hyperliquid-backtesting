@@ -28,6 +28,7 @@ pub struct FundingPoint {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 struct FundingHistoryResponse {
     coin: String,
     #[serde(rename = "fundingRate")]
