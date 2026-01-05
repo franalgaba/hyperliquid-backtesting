@@ -31,6 +31,8 @@ lz4_flex = "0.11"
 futures = "0.3"
 reqwest = { version = "0.11", features = ["json"] }
 rayon = "1.8"
+parquet = "54.0"
+arrow = "54.0"
 
 [dev-dependencies]
 tempfile = "3.10"

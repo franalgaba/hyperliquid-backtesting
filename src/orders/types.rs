@@ -98,6 +98,10 @@ pub struct SimConfig {
     pub maker_fee_bps: i16,
     pub taker_fee_bps: i16,
     pub slippage_bps: u16,
+    /// Minimum time between trades in milliseconds (cooldown period)
+    /// Prevents excessive trading when strategy triggers frequently
+    /// Default: 15 minutes (900,000 ms)
+    pub trade_cooldown_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

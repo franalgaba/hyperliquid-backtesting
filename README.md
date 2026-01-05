@@ -1,10 +1,17 @@
-# Hyperliquid Backtester
+# Hyperliquid Data Ingestor & Backtester
 
-High-performance Rust backtester for Hyperliquid trading strategies.
+High-performance Rust tool for fetching OHLC data from Hyperliquid and backtesting trading strategies.
 
-**This is a Rust Cargo package** - see the [main README](../README.md) for project structure.
+## Features
 
-## Building
+- Fetch OHLC candle data for any Hyperliquid token pair
+- Export data to **Parquet** format for efficient data analysis
+- L2 order book data ingestion from Hyperliquid S3 archive
+- Strategy backtesting with realistic order book fills
+- Built-in technical indicators (RSI, SMA, EMA, MACD, Bollinger Bands, etc.)
+- Configurable fees, slippage, and funding payments
+
+## Installation
 
 ```bash
 cargo build --release
@@ -12,79 +19,129 @@ cargo build --release
 
 The binary will be at `target/release/hl-backtest`.
 
-## Usage
+## Quick Start
 
-### Fetch Historical Data
+### Fetch OHLC Data
 
 ```bash
+# Fetch and cache BTC 1-hour candles
+hl-backtest fetch \
+  --asset BTC \
+  --interval 1h \
+  --start 2024-01-01 \
+  --end 2024-12-31
+
+# Fetch and export directly to Parquet
 hl-backtest fetch \
   --asset ETH \
   --interval 1h \
   --start 2024-01-01 \
-  --end 2024-06-30
+  --end 2024-06-30 \
+  --parquet data/eth_1h.parquet
 ```
 
-This downloads and caches candle data to `data/hyperliquid/{asset}/{interval}.csv`.
+### Export to Parquet
 
-**Note**: Hyperliquid does not provide historical candle data for spot markets via their API (see [their documentation](https://hyperliquid.gitbook.io/hyperliquid-docs/historical-data)). The `fetch` command will attempt to query the API, but may return empty results for older dates. You may need to:
-- Use the API to continuously record data yourself
-- Use mock/test data (see `examples/generate_test_data.py`)
-- Query only recent dates where data is available
+```bash
+hl-backtest export \
+  --asset BTC \
+  --interval 1h \
+  --start 2024-01-01 \
+  --end 2024-12-31 \
+  --out data/btc_1h.parquet
+```
 
 ### Run Backtest
 
 ```bash
 hl-backtest run \
-  --ir /path/to/strategy.ir.json \
-  --asset ETH \
+  --strategy examples/strategies/rsi_strategy.json \
+  --asset BTC \
   --interval 1h \
   --start 2024-01-01 \
   --end 2024-06-30 \
   --initial-capital 10000 \
-  --maker-fee-bps -1 \
-  --taker-fee-bps 10 \
-  --slippage-bps 5 \
-  --out results.json
+  --out results.json \
+  --parquet-results ./results/   # Optional: export trades & equity to Parquet
 ```
 
-### Output Files
+## Strategy Format
 
-- `results.json`: Complete backtest results with metrics
-- `results_trades.csv`: Trade log
-- `results_equity.csv`: Equity curve over time
+Strategies are defined in a simple JSON format:
 
-## Perps L2 Playback (Beta)
+```json
+{
+  "name": "RSI Oversold Strategy",
+  "instrument": {
+    "symbol": "BTCUSD",
+    "coin": "BTC",
+    "venue": "HL",
+    "timeframe": "1h"
+  },
+  "indicators": [
+    {
+      "id": "rsi_14",
+      "type": "RSI",
+      "params": { "period": 14 },
+      "outputs": ["value"]
+    }
+  ],
+  "entry": {
+    "condition": {
+      "type": "threshold",
+      "indicator": "rsi_14",
+      "op": "lt",
+      "value": 30.0
+    },
+    "action": {
+      "type": "buy",
+      "size_pct": 100.0
+    }
+  },
+  "exit": {
+    "condition": {
+      "type": "threshold",
+      "indicator": "rsi_14",
+      "op": "gt",
+      "value": 70.0
+    },
+    "action": {
+      "type": "close"
+    }
+  }
+}
+```
 
-The backtester supports event-driven perps backtesting using Hyperliquid's historical L2 order book data from S3. This provides realistic fill simulation based on actual order book depth.
+### Condition Types
 
-### Ingest L2 Data from S3
+- **threshold**: Compare indicator to a value (`lt`, `lte`, `eq`, `ne`, `gte`, `gt`)
+- **crossover**: Detect when fast indicator crosses above/below slow indicator
+- **and**: Logical AND of multiple conditions
+- **or**: Logical OR of multiple conditions
 
-Download historical L2 order book snapshots:
+### Actions
+
+- **buy**: Buy with percentage of capital (`size_pct: 100.0`)
+- **sell**: Sell percentage of position
+- **close**: Close entire position
+
+## L2 Order Book Data
+
+For realistic backtesting with order book fills:
+
+### Download L2 Data from S3
 
 ```bash
 hl-backtest ingest s3 \
   --coin BTC \
-  --start 20230916 \
-  --start-hour 9 \
-  --end 20230916 \
-  --end-hour 11 \
+  --start 20240101 \
+  --end 20240131 \
   --out data/s3
 ```
 
-This downloads `.lz4` files from `s3://hyperliquid-archive/market_data/`.
-
-**Note**: Based on the Python download script pattern (using `--request-payer requester`), 
-the bucket appears to require:
-- **AWS credentials** (configure via `aws configure` or environment variables)
-- **Request-payer=requester header** (you pay for data transfer, ~$0.09/GB)
-
-If downloads fail, check AWS credentials are configured.
-
-See `docs/S3_SETUP.md` for detailed setup instructions.
+**Note**: Requires AWS credentials and pays for data transfer (~$0.09/GB).
 
 ### Build Events
-
-Convert downloaded L2 files to event format:
 
 ```bash
 hl-backtest ingest build-events \
@@ -93,88 +150,70 @@ hl-backtest ingest build-events \
   --out data/events
 ```
 
-This decompresses LZ4 files, parses JSONL, and creates normalized event files.
-
 ### Run Perps Backtest
-
-Run a backtest using L2 events:
 
 ```bash
 hl-backtest run-perps \
-  --ir strategy.json \
+  --strategy examples/strategies/rsi_strategy.json \
   --coin BTC \
   --events data/events \
-  --start 20230916-09 \
-  --end 20230916-11 \
+  --start 20240101-00 \
+  --end 20240131-23 \
   --initial-capital 10000 \
-  --maker-fee-bps -1 \
-  --taker-fee-bps 10 \
-  --out perps_results.json
+  --out results.json
 ```
 
-### How It Works
+## Available Indicators
 
-1. **Order Book Reconstruction**: Each L2 snapshot updates a full order book (bids/asks)
-2. **Realistic Fills**: Market orders sweep the book; limit orders fill when price crosses
-3. **Funding Payments**: Applied every 8 hours based on position notional and funding rate
-4. **Maker/Taker Fees**: Correctly applied based on order type and execution
+| Indicator | Type | Parameters |
+|-----------|------|------------|
+| RSI | Momentum | `period` |
+| SMA | Trend | `period` |
+| EMA | Trend | `period` |
+| MACD | Trend | `fast`, `slow`, `signal` |
+| Bollinger Bands | Volatility | `period`, `std_dev` |
+| Stochastic | Momentum | `k_period`, `d_period` |
+| ATR | Volatility | `period` |
+| ADX | Trend | `period` |
+| OBV | Volume | - |
 
-### Limitations
+## Output Files
 
-- S3 data may have gaps (Hyperliquid docs warn: "no guarantee of timely updates")
-- Large date ranges may require significant S3 transfer costs
-- Funding history is fetched from Hyperliquid API (see [API docs](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/perpetuals#retrieve-historical-funding-rates))
+### JSON/CSV (default)
+- `results.json`: Complete backtest results with metrics
+- `results_trades.csv`: Trade log
+- `results_equity.csv`: Equity curve
 
-## Features
+### Parquet (with `--parquet-results`)
+- `trades.parquet`: Trade fills (timestamp, symbol, side, size, price, fee, order_id)
+- `equity.parquet`: Equity curve (timestamp, equity, cash, position_value)
 
-- Supports all Hyperliquid order types (Market, Limit, Stop, Take, etc.)
-- Configurable maker/taker fees and slippage
-- Portfolio accounting with position tracking
-- Comprehensive performance metrics (Sharpe, Sortino, drawdown, etc.)
-- High-performance custom indicators (RSI, SMA, EMA, MACD, BBands, Stochastic, ATR, ADX, OBV)
-- **Perps L2 playback** with realistic order book fills and funding payments
+Use Parquet for efficient data analysis with pandas, polars, or DuckDB:
 
-## Testing
+```python
+import pandas as pd
 
-```bash
-cargo test
+trades = pd.read_parquet("results/trades.parquet")
+equity = pd.read_parquet("results/equity.parquet")
 ```
 
-## Documentation
+## Supported Assets
 
-Comprehensive documentation is available in the `docs/` directory:
-
-- **[Documentation Index](docs/DOCUMENTATION_INDEX.md)** - Complete documentation catalog
-- **[Quick Start Guide](docs/QUICK_START.md)** - Get started in minutes
-- **[API Documentation](docs/API.md)** - Complete API reference with examples
-- **[Architecture Overview](docs/ARCHITECTURE.md)** - System design and component details
-- **[Performance Optimizations](docs/PERFORMANCE_OPTIMIZATIONS.md)** - Performance improvements and benchmarks
-- **[S3 Setup Guide](docs/S3_SETUP.md)** - Instructions for downloading L2 data from S3
-- **[Security Documentation](docs/SECURITY.md)** - Security practices and audit findings
-- **[Test Coverage](docs/TEST_COVERAGE.md)** - Test suite information
-
-### Quick Links
-
-- **Getting Started**: See [Quick Start Guide](docs/QUICK_START.md)
-- **API Reference**: See [API Documentation](docs/API.md)
-- **Understanding the Engine**: See [Architecture Overview](docs/ARCHITECTURE.md)
+Currently supported: BTC, ETH, SOL, HYPE
 
 ## Development
 
-### Building Documentation
-
 ```bash
-# Generate Rust documentation
+# Run tests
+cargo test
+
+# Generate documentation
 cargo doc --open
 
-# View documentation index
-cat docs/DOCUMENTATION_INDEX.md
+# Build release
+cargo build --release
 ```
 
-### Code Quality
+## License
 
-- All code follows Rust best practices
-- Comprehensive error handling with `anyhow`
-- Security-focused input validation
-- Performance-optimized for large datasets
-
+MIT

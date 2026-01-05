@@ -43,8 +43,8 @@ uv.lock
 *~
 .DS_Store
 
-# Data
-data/
+# Data (at project root only)
+/data/
 *.csv
 *.jsonl
 *.lz4

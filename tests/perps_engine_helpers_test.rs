@@ -17,6 +17,7 @@ mod tests {
             maker_fee_bps: -1,
             taker_fee_bps: 10,
             slippage_bps: 5,
+            trade_cooldown_ms: None,
         };
         PerpsEngine::new(funding, &config)
     }
@@ -33,6 +34,7 @@ mod tests {
             maker_fee_bps: -1,
             taker_fee_bps: 10,
             slippage_bps: 5,
+            trade_cooldown_ms: None,
         };
         let engine = PerpsEngine::new(funding, &config);
         

@@ -1,0 +1,40 @@
+{
+  "name": "RSI Oversold Strategy",
+  "instrument": {
+    "symbol": "BTCUSD",
+    "coin": "BTC",
+    "venue": "HL",
+    "timeframe": "1h"
+  },
+  "indicators": [
+    {
+      "id": "rsi_14",
+      "type": "RSI",
+      "params": { "period": 14 },
+      "outputs": ["value"]
+    }
+  ],
+  "entry": {
+    "condition": {
+      "type": "threshold",
+      "indicator": "rsi_14",
+      "op": "lt",
+      "value": 30.0
+    },
+    "action": {
+      "type": "buy",
+      "size_pct": 100.0
+    }
+  },
+  "exit": {
+    "condition": {
+      "type": "threshold",
+      "indicator": "rsi_14",
+      "op": "gt",
+      "value": 70.0
+    },
+    "action": {
+      "type": "close"
+    }
+  }
+}

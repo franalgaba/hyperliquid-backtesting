@@ -1,129 +1,119 @@
 # Quick Start Guide
 
-This guide will help you get started with the Hyperliquid backtester quickly.
+Get up and running with the Hyperliquid Data Ingestor & Backtester in 5 minutes.
 
 ## Prerequisites
 
-- Rust 1.70+ installed
-- AWS credentials configured (for S3 data access)
-- Basic understanding of trading concepts
+- Rust 1.70+ (install via [rustup](https://rustup.rs/))
+- AWS credentials (for L2 data only)
 
 ## Installation
 
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd hyperliquid-backtesting/backtester
-
-# Build the project
+# Clone and build
+git clone https://github.com/your-org/hyperliquid-backtesting.git
+cd hyperliquid-backtesting
 cargo build --release
 
-# The binary will be at target/release/hl-backtest
+# Add to PATH (optional)
+export PATH="$PATH:$(pwd)/target/release"
 ```
 
-## Basic Usage
-
-### 1. Download L2 Data
-
-First, download historical L2 order book data from S3:
+## Step 1: Fetch Data
 
 ```bash
-hl-backtest ingest s3 \
-  --coin BTC \
-  --start 20230916 \
-  --start-hour 9 \
-  --end 20230916 \
-  --end-hour 11 \
-  --out data/s3
+# Fetch BTC 1-hour candles for 2024
+hl-backtest fetch \
+  --asset BTC \
+  --interval 1h \
+  --start 2024-01-01 \
+  --end 2024-06-30
 ```
 
-**Note**: This requires AWS credentials. See [S3 Setup Guide](S3_SETUP.md) for details.
+Data is cached locally in `data/hyperliquid/BTC/1h.csv`.
 
-### 2. Build Events
+## Step 2: Create a Strategy
 
-Convert the downloaded L2 files to event format:
-
-```bash
-hl-backtest ingest build-events \
-  --coin BTC \
-  --input data/s3 \
-  --out data/events
-```
-
-This creates JSONL files in `data/events/BTC/` that the backtester can process.
-
-### 3. Create a Strategy
-
-Create a simple strategy file (`strategy.json`):
+Create `my_strategy.json`:
 
 ```json
 {
-  "entry": "start",
-  "nodes": {
-    "start": {
-      "type": "condition",
-      "expr": {
-        "lhs": { "ref": "sma_20.value" },
-        "op": "gt",
-        "rhs": { "ref": "sma_50.value" }
-      },
-      "true_branch": "buy",
-      "false_branch": "end"
-    },
-    "buy": {
-      "type": "action",
-      "action": {
-        "kind": "buy",
-        "symbol": "BTC",
-        "sizing": { "mode": "cash", "value": 1000 },
-        "order": { "type": "MARKET" }
-      },
-      "next": "end"
-    },
-    "end": {
-      "type": "terminal"
-    }
+  "name": "RSI Oversold",
+  "instrument": {
+    "symbol": "BTCUSD",
+    "coin": "BTC",
+    "venue": "HL",
+    "timeframe": "1h"
   },
   "indicators": [
     {
-      "id": "sma_20",
-      "type": "SMA",
-      "params": { "length": 20 },
-      "lookback": 20
-    },
-    {
-      "id": "sma_50",
-      "type": "SMA",
-      "params": { "length": 50 },
-      "lookback": 50
+      "id": "rsi",
+      "type": "RSI",
+      "params": { "period": 14 },
+      "outputs": ["value"]
     }
-  ]
+  ],
+  "entry": {
+    "condition": {
+      "type": "threshold",
+      "indicator": "rsi",
+      "op": "lt",
+      "value": 30.0
+    },
+    "action": {
+      "type": "buy",
+      "size_pct": 100.0
+    }
+  },
+  "exit": {
+    "condition": {
+      "type": "threshold",
+      "indicator": "rsi",
+      "op": "gt",
+      "value": 70.0
+    },
+    "action": {
+      "type": "close"
+    }
+  }
 }
 ```
 
-### 4. Run Backtest
-
-Run the backtest:
+## Step 3: Run Backtest
 
 ```bash
-hl-backtest run-perps \
-  --ir strategy.json \
-  --coin BTC \
-  --events data/events \
-  --start 20230916-09 \
-  --end 20230916-11 \
+hl-backtest run \
+  --strategy my_strategy.json \
+  --asset BTC \
+  --interval 1h \
+  --start 2024-01-01 \
+  --end 2024-06-30 \
   --initial-capital 10000 \
-  --maker-fee-bps -1 \
-  --taker-fee-bps 10 \
   --out results.json
 ```
 
-### 5. View Results
+## Step 4: Analyze Results
 
 Results are written to:
-- `results.json` - Complete backtest results
+- `results.json` - Complete metrics
 - `results_trades.csv` - Trade log
-- `results_equity.csv` - Equity curve over time
+- `results_equity.csv` - Equity curve
+
+### Key Metrics in results.json
+
+```json
+{
+  "final_equity": 12500.0,
+  "total_return_pct": 25.0,
+  "num_trades": 42,
+  "win_rate": 0.62,
+  "max_drawdown_pct": 8.5,
+  "sharpe_ratio": 1.8,
+  "sortino_ratio": 2.1
+}
+```
+
+### View Results
 
 ```bash
 # View summary
@@ -136,144 +126,118 @@ head -20 results_trades.csv
 head -20 results_equity.csv
 ```
 
-## Common Patterns
+## Optional: Export to Parquet
 
-### Market Order Strategy
+For efficient data analysis with Python:
 
-```json
-{
-  "action": {
-    "kind": "buy",
-    "symbol": "BTC",
-    "sizing": { "mode": "cash", "value": 1000 },
-    "order": { "type": "MARKET" }
-  }
-}
+```bash
+# Export OHLC data to Parquet
+hl-backtest fetch \
+  --asset BTC \
+  --interval 1h \
+  --start 2024-01-01 \
+  --end 2024-06-30 \
+  --parquet btc_1h.parquet
+
+# Export backtest results to Parquet
+hl-backtest run \
+  --strategy my_strategy.json \
+  --asset BTC \
+  --interval 1h \
+  --start 2024-01-01 \
+  --end 2024-06-30 \
+  --parquet-results ./results/
 ```
 
-### Limit Order Strategy
+Then in Python:
 
-```json
-{
-  "action": {
-    "kind": "buy",
-    "symbol": "BTC",
-    "sizing": { "mode": "qty", "value": 0.1 },
-    "order": {
-      "type": "LIMIT",
-      "limit": 50000.0,
-      "tif": "GTC"
-    }
-  }
-}
+```python
+import pandas as pd
+
+# Load OHLC data
+candles = pd.read_parquet("btc_1h.parquet")
+
+# Load backtest results
+trades = pd.read_parquet("results/trades.parquet")
+equity = pd.read_parquet("results/equity.parquet")
+
+# Analyze
+print(trades.describe())
+equity.plot(x='timestamp', y='equity')
 ```
 
-### RSI Mean Reversion
+## Common Strategies
+
+### SMA Crossover
 
 ```json
 {
-  "entry": "start",
-  "nodes": {
-    "start": {
-      "type": "condition",
-      "expr": {
-        "lhs": { "ref": "rsi.value" },
-        "op": "lt",
-        "rhs": { "const": 30 }
-      },
-      "true_branch": "buy",
-      "false_branch": "end"
-    },
-    "buy": {
-      "type": "action",
-      "action": {
-        "kind": "buy",
-        "symbol": "BTC",
-        "sizing": { "mode": "pct", "value": 10 },
-        "order": { "type": "MARKET" }
-      },
-      "next": "end"
-    },
-    "end": { "type": "terminal" }
-  },
+  "name": "SMA Crossover",
+  "instrument": { "symbol": "BTCUSD", "coin": "BTC", "venue": "HL", "timeframe": "1h" },
   "indicators": [
-    {
-      "id": "rsi",
-      "type": "RSI",
-      "params": { "length": 14 },
-      "lookback": 14
-    }
-  ]
+    { "id": "sma_10", "type": "SMA", "params": { "period": 10 }, "outputs": ["value"] },
+    { "id": "sma_50", "type": "SMA", "params": { "period": 50 }, "outputs": ["value"] }
+  ],
+  "entry": {
+    "condition": { "type": "crossover", "fast": "sma_10", "slow": "sma_50", "direction": "above" },
+    "action": { "type": "buy", "size_pct": 100.0 }
+  },
+  "exit": {
+    "condition": { "type": "crossover", "fast": "sma_10", "slow": "sma_50", "direction": "below" },
+    "action": { "type": "close" }
+  }
 }
 ```
 
-## Understanding Results
+### RSI with MACD Confirmation
 
-### Key Metrics
-
-- **final_equity**: Final portfolio value
-- **total_return**: Absolute return in dollars
-- **total_return_pct**: Percentage return
-- **num_trades**: Number of trades executed
-- **win_rate**: Percentage of profitable trades
-- **max_drawdown**: Maximum peak-to-trough decline
-
-### Trade Log
-
-The trade log (`*_trades.csv`) contains:
-- `timestamp`: When the trade executed
-- `symbol`: Coin symbol
-- `side`: BUY or SELL
-- `size`: Trade size
-- `price`: Execution price
-- `fee`: Fee paid
-- `order_id`: Order identifier
-
-### Equity Curve
-
-The equity curve (`*_equity.csv`) contains:
-- `timestamp`: Time point
-- `equity`: Total portfolio value
-- `cash`: Cash balance
-- `position_value`: Value of open position
+```json
+{
+  "name": "RSI + MACD",
+  "instrument": { "symbol": "BTCUSD", "coin": "BTC", "venue": "HL", "timeframe": "1h" },
+  "indicators": [
+    { "id": "rsi", "type": "RSI", "params": { "period": 14 }, "outputs": ["value"] },
+    { "id": "macd", "type": "MACD", "params": { "fast": 12, "slow": 26, "signal": 9 }, "outputs": ["histogram"] }
+  ],
+  "entry": {
+    "condition": {
+      "type": "and",
+      "conditions": [
+        { "type": "threshold", "indicator": "rsi", "op": "lt", "value": 35.0 },
+        { "type": "threshold", "indicator": "macd.histogram", "op": "gt", "value": 0.0 }
+      ]
+    },
+    "action": { "type": "buy", "size_pct": 100.0 }
+  },
+  "exit": {
+    "condition": { "type": "threshold", "indicator": "rsi", "op": "gt", "value": 70.0 },
+    "action": { "type": "close" }
+  }
+}
+```
 
 ## Troubleshooting
 
-### "No events found in range"
+### "No candles found"
 
-- Check that event files exist in the events directory
-- Verify timestamp range matches available data
-- Ensure files are named correctly (format: `YYYYMMDD-HH.jsonl`)
+- Check that you've run `fetch` for the asset and interval
+- Verify the date range is valid
+- Hyperliquid may not have data for very old dates
 
-### "Failed to fetch funding history"
+### "Unknown indicator"
 
-- Check internet connection
-- Verify coin symbol is correct
-- Ensure timestamp range is valid (max 1 year)
+- Check indicator type spelling (RSI, SMA, EMA, MACD, etc.)
+- See [Indicators Reference](INDICATORS.md) for available indicators
 
-### "Insufficient liquidity" warnings
+### "Failed to parse strategy JSON"
 
-- This is normal for market orders when book depth is low
-- Orders will retry on next event if liquidity becomes available
-- Consider using limit orders for better fill control
-
-### Performance Issues
-
-- Use `--io-concurrency` to limit parallel file reading
-- Disable parallel indicators if you have only one indicator
-- Consider reducing the time range for faster testing
+- Validate JSON syntax
+- Ensure all required fields are present
+- Check that condition/action types are valid
 
 ## Next Steps
 
-- Read the [API Documentation](API.md) for detailed function references
-- Explore the [Architecture Overview](ARCHITECTURE.md) to understand the system
-- Check [Performance Optimizations](PERFORMANCE_OPTIMIZATIONS.md) for tuning tips
-- Review example strategies in `examples/strategies/`
-
-## Getting Help
-
-- Check the [API Documentation](API.md) for function details
-- Review [Common Pitfalls](API.md#common-pitfalls) section
-- Look at example strategies in the repository
-- Review error messages - they include context about what went wrong
-
+- [Write complex strategies](STRATEGIES.md)
+- [Use all available indicators](INDICATORS.md)
+- [Ingest L2 order book data](DATA_INGESTION.md)
+- [Export to Parquet for analysis](PARQUET.md)

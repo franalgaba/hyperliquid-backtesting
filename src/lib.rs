@@ -3,7 +3,7 @@ pub mod data;
 pub mod fees;
 pub mod indicators2;
 pub mod ingest;
-pub mod ir;
+pub mod strategy;
 pub mod metrics;
 pub mod orderbook;
 pub mod orders;

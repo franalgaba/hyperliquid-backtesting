@@ -2,226 +2,253 @@
 
 ## System Architecture
 
-The Hyperliquid backtester is designed as a high-performance, event-driven simulation engine for testing trading strategies against historical market data.
+The Hyperliquid Data Ingestor & Backtester is designed as a high-performance, event-driven simulation engine for testing trading strategies against historical market data.
 
 ```
-Backtester CLI
-    |
-    v
-Strategy Compiler
-    |
-    v
-PerpsEngine
-    ├── OrderBook (L2 state)
-    ├── Portfolio (Positions)
-    ├── Indicators (RSI, SMA...)
-    ├── FundingSchedule
-    └── FeeCalculator
-    |
-    v
-PerpsExecution
-    (Order execution logic)
+┌─────────────────────────────────────────────────────────────────┐
+│                         CLI (cli.rs)                            │
+│  Commands: fetch, export, run, run-perps, ingest                │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        │                     │                     │
+        ▼                     ▼                     ▼
+┌───────────────┐    ┌───────────────┐    ┌───────────────┐
+│  Data Module  │    │   Strategy    │    │    Ingest     │
+│               │    │    Module     │    │    Module     │
+│ • loader.rs   │    │ • types.rs    │    │ • s3.rs       │
+│ • cache.rs    │    │ • compile.rs  │    │ • l2_parser   │
+│ • parquet.rs  │    │ • eval.rs     │    │               │
+└───────────────┘    └───────────────┘    └───────────────┘
+        │                     │                     │
+        └─────────────────────┼─────────────────────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        │                     │                     │
+        ▼                     ▼                     ▼
+┌───────────────┐    ┌───────────────┐    ┌───────────────┐
+│ OrdersEngine  │    │  PerpsEngine  │    │  Indicators   │
+│ (Candle-based)│    │ (L2 Events)   │    │  (Technical)  │
+└───────────────┘    └───────────────┘    └───────────────┘
+        │                     │                     │
+        └─────────────────────┼─────────────────────┘
+                              │
+                              ▼
+                    ┌───────────────┐
+                    │   Portfolio   │
+                    │  & Execution  │
+                    └───────────────┘
 ```
 
-## Component Details
+## Module Overview
 
-### PerpsEngine
+### Data Module (`src/data/`)
 
-**Purpose**: Main simulation engine that orchestrates the backtest.
+Handles market data fetching, caching, and export.
 
-**Responsibilities**:
-- Loading and processing L2 events
-- Maintaining order book state
-- Evaluating strategies
-- Executing orders
-- Tracking portfolio state
-- Recording results
+| File | Purpose |
+|------|---------|
+| `loader.rs` | Fetch candles from Hyperliquid API |
+| `cache.rs` | Local CSV caching |
+| `parquet.rs` | Parquet export (candles, trades, equity) |
+| `types.rs` | Candle data structures |
 
-**Key Design Decisions**:
-- **Event-driven**: Processes events sequentially to maintain temporal accuracy
-- **Order book reconstruction**: Rebuilds book from snapshots (doesn't modify after execution)
-- **Strategy throttling**: Only evaluates on significant price changes (0.01% threshold)
-- **Parallel I/O**: File loading is parallelized for performance
+### Strategy Module (`src/strategy/`)
 
-### OrderBook
+Simplified strategy definition and evaluation.
 
-**Purpose**: Maintains current bid/ask levels from L2 snapshots.
+| File | Purpose |
+|------|---------|
+| `types.rs` | Strategy, Condition, Action types |
+| `compile.rs` | Compile strategy (resolve indicator lookbacks) |
+| `eval.rs` | Evaluate conditions against indicator values |
 
-**Data Structure**:
-- `BTreeMap<u64, f64>` for bids (price scaled to integer → size)
-- `BTreeMap<u64, f64>` for asks (price scaled to integer → size)
+### Ingest Module (`src/ingest/`)
 
-**Key Operations**:
-- `apply_snapshot()`: Replaces entire book with new snapshot
-- `best_bid()` / `best_ask()`: Get best prices
-- `mid_price()`: Calculate mid price
-- `sweep_market_buy()` / `sweep_market_sell()`: Execute market orders
+L2 order book data ingestion from S3.
 
-**Design Notes**:
-- Uses scaled integers for price keys (1e8 scale) for efficient BTreeMap operations
-- Book state is NOT modified after execution (correct for backtesting)
+| File | Purpose |
+|------|---------|
+| `s3.rs` | Download from Hyperliquid S3 archive |
+| `l2_parser.rs` | Parse LZ4-compressed L2 snapshots |
 
-### PerpsExecution
+### Orders Module (`src/orders/`)
 
-**Purpose**: Handles order execution logic.
+Candle-based backtesting engine.
 
-**Key Functions**:
-- `execute_market()`: Execute market orders immediately
-- `check_limit_fill()`: Check if limit orders should fill
-- `can_place_limit()`: Validate limit order placement
+| File | Purpose |
+|------|---------|
+| `engine.rs` | Main simulation loop |
+| `types.rs` | Order, Trade, SimResult types |
+| `fills.rs` | Order fill processing |
 
-**Execution Flow**:
-1. Market orders: Execute immediately, sweep book
-2. Limit orders: Check on each event, fill when price crosses
-3. Partial fills: Track remaining size, update order state
+### Perps Module (`src/perps/`)
 
-### Portfolio
+L2 event-driven perpetuals backtesting.
 
-**Purpose**: Tracks positions, cash, and equity.
+| File | Purpose |
+|------|---------|
+| `engine.rs` | Event-driven simulation |
+| `execution.rs` | Order execution against order book |
+| `funding.rs` | Funding rate handling |
+| `trade_utils.rs` | Trade utilities |
 
-**State**:
-- `cash`: Available cash balance
-- `positions`: Map of coin → position (size, entry price)
-- `fee_calc`: Fee calculator reference
+---
 
-**Key Operations**:
-- `execute_trade()`: Update cash and positions
-- `total_equity()`: Calculate total portfolio value
-- `get_position_value()`: Get position notional value
+## Strategy System
 
-### FundingSchedule
+### Strategy Definition
 
-**Purpose**: Manages historical funding rates.
+Strategies are defined in JSON with:
+- **Indicators**: Technical indicators to compute
+- **Entry Rule**: Condition + Action for opening positions
+- **Exit Rule**: Condition + Action for closing positions
 
-**Data Structure**:
-- `Vec<FundingPoint>`: Sorted by timestamp
-- Each point contains: timestamp, rate
+### Condition Types
 
-**Key Operations**:
-- `from_api()`: Fetch from Hyperliquid API
-- `rate_at()`: Lookup rate by timestamp
-- `calculate_payment()`: Calculate funding payment
+```rust
+enum Condition {
+    Threshold { indicator, op, value },  // Compare to constant
+    Crossover { fast, slow, direction }, // Indicator crossover
+    And { conditions },                  // Logical AND
+    Or { conditions },                   // Logical OR
+}
+```
 
-**Design Notes**:
-- Rates are fetched once at start of backtest
-- Lookup is O(log n) using binary search
-- Validates inputs for security
+### Evaluation Flow
+
+```
+Load Strategy JSON
+       │
+       ▼
+Compile (resolve lookbacks)
+       │
+       ▼
+For each candle/event:
+       │
+       ├─> Update indicators
+       │
+       ├─> If FLAT position:
+       │   └─> Evaluate entry condition
+       │       └─> If true: create order
+       │
+       └─> If IN position:
+           └─> Evaluate exit condition
+               └─> If true: close position
+```
+
+---
+
+## Backtesting Engines
+
+### OrdersEngine (Candle-based)
+
+Simple backtesting on OHLC data:
+- Fills at candle close price
+- No order book simulation
+- Fast execution
+
+### PerpsEngine (L2 Events)
+
+Realistic backtesting on order book snapshots:
+- Real order book reconstruction
+- Market orders sweep book
+- Limit orders fill on price cross
+- Funding payments every 8 hours
+
+---
 
 ## Data Flow
 
-### Backtest Execution Flow
+### OHLC Data Pipeline
 
 ```
-1. Load Events
-   └─> Read JSONL files from directory
-   └─> Parse L2 snapshots
-   └─> Filter by timestamp range
-   └─> Sort by timestamp
-
-2. Initialize Engine
-   └─> Create OrderBook
-   └─> Fetch FundingSchedule
-   └─> Initialize Portfolio
-   └─> Create Indicators
-
-3. Process Events (for each event)
-   ├─> Update OrderBook (apply snapshot)
-   ├─> Update Indicators (synthetic candle)
-   ├─> Evaluate Strategy (if price changed)
-   │   └─> Create new orders
-   ├─> Execute Market Orders (immediately)
-   ├─> Check Limit Orders (for fills)
-   ├─> Apply Funding (every 8 hours)
-   └─> Record Equity (every minute)
-
-4. Calculate Results
-   └─> Final equity
-   └─> Total return
-   └─> Performance metrics
+Hyperliquid API → loader.rs → cache.rs (CSV) → parquet.rs (Parquet)
+                                    │
+                                    ▼
+                              OrdersEngine
 ```
 
-### Order Execution Flow
+### L2 Data Pipeline
 
 ```
-Market Order:
-  Order Created → Execute Immediately → Fill (or retry) → Update Portfolio → Remove Order
-
-Limit Order:
-  Order Created → Add to Active Orders → Check Each Event → Fill When Price Crosses → 
-  Update Portfolio → Remove When Fully Filled
+S3 Archive → s3.rs → l2_parser.rs → events (JSONL)
+                                         │
+                                         ▼
+                                   PerpsEngine
 ```
+
+---
+
+## Key Components
+
+### OrderBook (`src/orderbook/`)
+
+BTreeMap-based limit order book:
+- `apply_snapshot()`: Update from L2 data
+- `best_bid()` / `best_ask()`: Get best prices
+- `sweep_market_buy()`: Execute market orders
+
+### Portfolio (`src/portfolio.rs`)
+
+Position and cash tracking:
+- `cash`: Available balance
+- `positions`: Map of symbol → position
+- `execute_trade()`: Update on fills
+- `total_equity()`: Calculate portfolio value
+
+### FeeCalculator (`src/fees.rs`)
+
+Fee and slippage calculation:
+- Maker/taker fees (basis points)
+- Slippage simulation
+
+---
 
 ## Performance Optimizations
 
-### Memory Management
-- Pre-allocated vectors with estimated capacity
-- Reused synthetic candle (updated in-place)
-- Reused coin strings to avoid allocations
+### Memory
+- Pre-allocated vectors
+- Reused synthetic candles
+- Efficient string handling
 
 ### Computation
-- Strategy evaluation throttled to price changes
-- Parallel file I/O for loading events
-- Parallel indicator updates (when multiple indicators)
-- Efficient order removal (swap_remove pattern)
+- Strategy evaluation throttled (0.01% price change)
+- Parallel indicator updates
+- Efficient order removal (swap_remove)
 
 ### I/O
-- Streaming file parsing (doesn't load entire file)
-- Parallel file reading with bounded concurrency
-- Efficient JSONL parsing
+- Parallel file loading
+- Streaming JSONL parsing
+- Snappy-compressed Parquet
+
+---
 
 ## Error Handling
 
-### Error Propagation
-- Uses `anyhow::Result` for error handling
+- `anyhow::Result` for error propagation
 - Context-aware errors with `.with_context()`
-- Early returns on errors
+- Input validation (assets, dates, parameters)
 
-### Validation
-- Input validation (coin names, dates, timestamps)
-- Order validation (sizes, prices)
-- Range checks (funding intervals, equity recording)
+---
 
-## Security Considerations
+## Security
 
 ### Input Validation
-- Coin names validated (alphanumeric only, no path traversal)
-- Date formats validated (YYYYMMDD, 8 digits)
-- Timestamp ranges validated (max 1 year)
+- Asset names: alphanumeric only
+- Dates: format validation
+- Paths: no traversal allowed
 
 ### API Security
 - HTTPS with certificate validation
-- Request timeouts (30 seconds)
+- Request timeouts
 - Parameter sanitization
 
-## Testing Strategy
-
-### Unit Tests
-- Individual component tests
-- Edge case coverage
-- Error handling tests
-
-### Integration Tests
-- End-to-end backtest scenarios
-- Order execution scenarios
-- Funding payment scenarios
-
-## Future Improvements
-
-### Potential Enhancements
-1. **Caching**: Cache compiled strategies
-2. **Streaming**: Stream events instead of loading all
-3. **Metrics**: More detailed performance metrics
-4. **Visualization**: Real-time equity curve visualization
-5. **Multi-asset**: Support multiple assets simultaneously
-
-### Performance Opportunities
-1. **SIMD**: Use SIMD for indicator calculations
-2. **GPU**: Offload indicator updates to GPU
-3. **Distributed**: Distribute across multiple machines
+---
 
 ## See Also
 
-- [API Documentation](API.md)
-- [Performance Optimizations](PERFORMANCE_OPTIMIZATIONS.md)
-- [Security Documentation](SECURITY.md)
-
+- [CLI Reference](CLI.md)
+- [Strategies Guide](STRATEGIES.md)
+- [Indicators Reference](INDICATORS.md)
+- [Data Ingestion](DATA_INGESTION.md)
