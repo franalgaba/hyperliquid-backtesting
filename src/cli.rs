@@ -13,6 +13,7 @@ use crate::orders::simulate;
 use crate::perps::funding::FundingSchedule;
 use crate::report::write_results;
 use std::fs;
+use std::time::Instant;
 use tokio::fs as tokio_fs;
 use tokio::io::AsyncWriteExt;
 
@@ -211,6 +212,7 @@ impl Cli {
                 end,
                 parquet,
             } => {
+                let start_time = Instant::now();
                 validate_asset(&asset)?;
                 let start_date = NaiveDate::parse_from_str(&start, "%Y-%m-%d")
                     .context("Invalid start date format (use YYYY-MM-DD)")?;
@@ -242,6 +244,9 @@ impl Cli {
                     export_candles_to_parquet(&candles, &parquet_path)?;
                     println!("Exported {} candles to {}", candles.len(), parquet_path.display());
                 }
+
+                let elapsed = start_time.elapsed();
+                println!("Completed in {:.2}s", elapsed.as_secs_f64());
                 Ok(())
             }
             Commands::Export {
@@ -251,6 +256,7 @@ impl Cli {
                 end,
                 out,
             } => {
+                let start_time = Instant::now();
                 validate_asset(&asset)?;
                 let start_date = NaiveDate::parse_from_str(&start, "%Y-%m-%d")
                     .context("Invalid start date format (use YYYY-MM-DD)")?;
@@ -279,6 +285,9 @@ impl Cli {
 
                 export_candles_to_parquet(&candles, &out)?;
                 println!("Exported {} candles to {}", candles.len(), out.display());
+
+                let elapsed = start_time.elapsed();
+                println!("Completed in {:.2}s", elapsed.as_secs_f64());
                 Ok(())
             }
             Commands::Run {
@@ -294,6 +303,7 @@ impl Cli {
                 out,
                 parquet_results,
             } => {
+                let start_time = Instant::now();
                 validate_asset(&asset)?;
                 let start_date = NaiveDate::parse_from_str(&start, "%Y-%m-%d")
                     .context("Invalid start date format (use YYYY-MM-DD)")?;
@@ -355,6 +365,8 @@ impl Cli {
                     println!("Exported {} equity points to {}", result.equity_curve.len(), equity_path.display());
                 }
 
+                let elapsed = start_time.elapsed();
+                println!("Completed in {:.2}s", elapsed.as_secs_f64());
                 Ok(())
             }
             Commands::Ingest { subcommand } => {
@@ -367,15 +379,20 @@ impl Cli {
                         end_hour,
                         out,
                     } => {
+                        let start_time = Instant::now();
                         validate_asset(&coin)?;
                         let downloader = S3Downloader::new(&out).await?;
                         let downloaded = downloader
                             .download_range(&coin, &start, start_hour, &end, end_hour)
                             .await?;
                         println!("Downloaded {} files for {}", downloaded.len(), coin);
+
+                        let elapsed = start_time.elapsed();
+                        println!("Completed in {:.2}s", elapsed.as_secs_f64());
                         Ok(())
                     }
                     IngestSubcommand::BuildEvents { coin, input, out } => {
+                        let start_time = Instant::now();
                         validate_asset(&coin)?;
                         let coin_dir = out.join(&coin);
                         fs::create_dir_all(&coin_dir)
@@ -427,6 +444,9 @@ impl Cli {
                         }
 
                         println!("Built events in {}", coin_dir.display());
+
+                        let elapsed = start_time.elapsed();
+                        println!("Completed in {:.2}s", elapsed.as_secs_f64());
                         Ok(())
                     }
                 }
@@ -446,6 +466,7 @@ impl Cli {
                 out,
                 parquet_results,
             } => {
+                let start_time = Instant::now();
                 validate_asset(&coin)?;
 
                 let parse_date_hour = |s: &str| -> Result<(String, u8)> {
@@ -538,6 +559,8 @@ impl Cli {
                     println!("Exported {} equity points to {}", result.equity_curve.len(), equity_path.display());
                 }
 
+                let elapsed = start_time.elapsed();
+                println!("Completed in {:.2}s", elapsed.as_secs_f64());
                 Ok(())
             }
         }
