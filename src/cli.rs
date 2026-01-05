@@ -16,10 +16,7 @@ use std::fs;
 use tokio::fs as tokio_fs;
 use tokio::io::AsyncWriteExt;
 
-/// Supported assets for backtesting
-const SUPPORTED_ASSETS: &[&str] = &["BTC", "ETH", "SOL", "HYPE"];
-
-/// Validate that an asset/coin is supported and secure
+/// Validate that an asset/coin name is secure (no path traversal, alphanumeric only)
 fn validate_asset(asset: &str) -> Result<()> {
     if asset.contains("..") || asset.contains('/') || asset.contains('\\') {
         anyhow::bail!("Invalid asset name: contains path traversal characters");
@@ -33,16 +30,7 @@ fn validate_asset(asset: &str) -> Result<()> {
         anyhow::bail!("Invalid asset name: only alphanumeric characters allowed");
     }
 
-    let asset_upper = asset.to_uppercase();
-    if SUPPORTED_ASSETS.contains(&asset_upper.as_str()) {
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "Unsupported asset: {}. Supported assets: {}",
-            asset,
-            SUPPORTED_ASSETS.join(", ")
-        )
-    }
+    Ok(())
 }
 
 #[derive(Parser)]
