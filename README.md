@@ -65,6 +65,19 @@ hl-backtest run \
   --parquet-results ./results/   # Optional: export trades & equity to Parquet
 ```
 
+### Run Backtest with Precomputed Signals
+
+```bash
+hl-backtest run-signals \
+  --signals data/signals.csv \
+  --asset BTC \
+  --interval 1h \
+  --start 2024-07-01 \
+  --end 2024-12-31 \
+  --initial-capital 10000 \
+  --out results.json
+```
+
 ## Strategy Format
 
 Strategies are defined in a simple JSON format:
@@ -121,9 +134,15 @@ Strategies are defined in a simple JSON format:
 
 ### Actions
 
-- **buy**: Buy with percentage of capital (`size_pct: 100.0`)
-- **sell**: Sell percentage of position
-- **close**: Close entire position
+- **buy**: Buy with percentage of capital (`size_pct: 100.0`). If short, covers a percentage of the short.
+- **sell**: Sell percentage of position. If flat, opens a short sized by available equity.
+- **close**: Close entire position (long or short)
+
+### Custom Rust Strategies
+
+Implement `strategy::BacktestStrategy` (warmup/on_warmup/on_candle) to plug in any custom strategy logic, then pass it to:
+- `orders::engine::simulate_with_strategy`
+- `perps::engine::PerpsEngine::run_with_strategy`
 
 ## L2 Order Book Data
 
@@ -176,6 +195,66 @@ hl-backtest run-perps \
 | ATR | Volatility | `period` |
 | ADX | Trend | `period` |
 | OBV | Volume | - |
+
+## Custom Strategy Interface
+
+For custom logic in Rust, implement the common `BacktestStrategy` interface and pass it to the engines:
+
+```rust
+use anyhow::Result;
+use hl_backtest::data::types::Candle;
+use hl_backtest::portfolio::Portfolio;
+use hl_backtest::strategy::BacktestStrategy;
+use hl_backtest::strategy::types::Action;
+
+struct MyStrategy;
+
+impl BacktestStrategy for MyStrategy {
+    fn warmup(&self) -> usize {
+        100
+    }
+
+    fn on_warmup(&mut self, _candle: &Candle) -> Result<()> {
+        Ok(())
+    }
+
+    fn on_candle(&mut self, candle: &Candle, portfolio: &Portfolio) -> Result<Option<Action>> {
+        let _ = (candle, portfolio);
+        Ok(None)
+    }
+}
+```
+
+Then run it via:
+- `orders::engine::simulate_with_strategy`
+- `perps::engine::PerpsEngine::run_with_strategy`
+
+## Build OHLC from L2 Events (Proxy for Spot)
+
+```bash
+./target/release/hl-backtest ingest build-ohlc \
+  --events data/events \
+  --coin BTC \
+  --interval 1h \
+  --out-csv data/hyperliquid/BTC/1h.csv \
+  --out-parquet data/btc_1h.parquet \
+  --fill-gaps
+```
+
+## Signals Backtests
+
+Use `run-signals` for any external strategy that outputs a CSV with `time_open,position`:
+
+```bash
+hl-backtest run-signals \
+  --signals data/signals.csv \
+  --asset BTC \
+  --interval 1h \
+  --start 2024-07-01 \
+  --end 2024-12-31 \
+  --initial-capital 10000 \
+  --out results.json
+```
 
 ## Output Files
 

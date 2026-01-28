@@ -1,21 +1,27 @@
 use crate::data::types::Candle;
 use crate::fees::FeeCalculator;
-use crate::indicators2::{create_indicator, IndicatorEvaluator};
-use crate::strategy::{compile_strategy, Action as StrategyAction, EvalState, Strategy};
+use crate::strategy::{Action as StrategyAction, BacktestStrategy, RuleBasedStrategy, Strategy};
 use crate::orders::fills::process_order_fill;
 use crate::orders::types::{
     Action, Order, OrderStatus, Side, SimConfig, SimResult, Trade, EquityPoint,
 };
 use crate::portfolio::Portfolio;
-use anyhow::{Context, Result};
-use std::collections::HashMap;
+use anyhow::Result;
 
 pub async fn simulate(
     candles: &[Candle],
     strategy: &Strategy,
     config: &SimConfig,
 ) -> Result<SimResult> {
-    let compiled = compile_strategy(strategy)?;
+    let mut rule_strategy = RuleBasedStrategy::from_strategy(strategy)?;
+    simulate_with_strategy(candles, &mut rule_strategy, config).await
+}
+
+pub async fn simulate_with_strategy(
+    candles: &[Candle],
+    strategy: &mut dyn BacktestStrategy,
+    config: &SimConfig,
+) -> Result<SimResult> {
     let fee_calc = FeeCalculator::new(
         config.maker_fee_bps,
         config.taker_fee_bps,
@@ -23,91 +29,37 @@ pub async fn simulate(
     );
     let mut portfolio = Portfolio::new(config.initial_capital, fee_calc.clone());
 
-    // Initialize indicators
-    let mut indicators: HashMap<String, Box<dyn IndicatorEvaluator>> = HashMap::new();
-    for ind in &compiled.indicators {
-        let evaluator = create_indicator(&ind.indicator_type, &ind.params)
-            .with_context(|| format!("Failed to create indicator: {}", ind.indicator_type))?;
-        indicators.insert(ind.id.clone(), evaluator);
-    }
-
-    // Warm up indicators
-    let max_lookback = compiled
-        .indicators
-        .iter()
-        .map(|i| i.lookback)
-        .max()
-        .unwrap_or(0);
-
-    if candles.len() < max_lookback {
+    let warmup = strategy.warmup();
+    if candles.len() < warmup {
         anyhow::bail!(
             "Not enough candles: need at least {}, got {}",
-            max_lookback,
+            warmup,
             candles.len()
         );
     }
 
-    // Warm up phase
-    for i in 0..max_lookback.min(candles.len()) {
-        let candle = &candles[i];
-        for evaluator in indicators.values_mut() {
-            evaluator.update(candle)?;
-        }
+    for candle in candles.iter().take(warmup) {
+        strategy.on_warmup(candle)?;
     }
 
-    // Active orders and positions
     let mut active_orders: Vec<Order> = Vec::new();
     let mut next_order_id = 1u64;
     let mut trades = Vec::new();
     let mut equity_curve = Vec::new();
-    let mut eval_state = EvalState::new();
 
-    // Main simulation loop
-    for (_idx, candle) in candles.iter().enumerate().skip(max_lookback) {
-        // Update indicators
-        for evaluator in indicators.values_mut() {
-            evaluator.update(candle)?;
-        }
-
-        // Get current indicator values
-        let indicator_values = get_indicator_values(&indicators)?;
-
-        // Determine which rule to evaluate based on position
-        let position_size = portfolio.get_position(&candle.coin);
-        let is_flat = position_size.abs() < 1e-10;
-
-        if is_flat {
-            // Flat position: evaluate entry rule
-            if eval_state.evaluate(&compiled.entry.condition, &indicator_values) {
-                if let Some(order) = create_order_from_strategy_action(
-                    &compiled.entry.action,
-                    candle,
-                    next_order_id,
-                    &portfolio,
-                )? {
-                    active_orders.push(order);
-                    next_order_id += 1;
-                }
-            }
-        } else if let Some(exit_rule) = &compiled.exit {
-            // In position: evaluate exit rule
-            if eval_state.evaluate(&exit_rule.condition, &indicator_values) {
-                if let Some(order) = create_order_from_strategy_action(
-                    &exit_rule.action,
-                    candle,
-                    next_order_id,
-                    &portfolio,
-                )? {
-                    active_orders.push(order);
-                    next_order_id += 1;
-                }
+    for candle in candles.iter().skip(warmup) {
+        if let Some(action) = strategy.on_candle(candle, &portfolio)? {
+            if let Some(order) = create_order_from_strategy_action(
+                &action,
+                candle,
+                next_order_id,
+                &portfolio,
+            )? {
+                active_orders.push(order);
+                next_order_id += 1;
             }
         }
 
-        // Update eval state with current values for crossover detection
-        eval_state.update(&indicator_values);
-
-        // Process active orders
         let mut orders_to_remove = Vec::new();
         for (order_idx, order) in active_orders.iter_mut().enumerate() {
             if let Some(fill_result) = process_order_fill(order, candle, &portfolio, &fee_calc) {
@@ -149,12 +101,10 @@ pub async fn simulate(
             }
         }
 
-        // Remove filled/canceled orders (in reverse to maintain indices)
         for idx in orders_to_remove.iter().rev() {
             active_orders.remove(*idx);
         }
 
-        // Record equity
         let current_price = candle.close;
         let equity = portfolio.total_equity(&candle.coin, current_price);
         equity_curve.push(EquityPoint {
@@ -165,18 +115,15 @@ pub async fn simulate(
         });
     }
 
-    // Calculate metrics
-    let final_equity = equity_curve.last().map(|e| e.equity).unwrap_or(config.initial_capital);
+    let final_equity = equity_curve
+        .last()
+        .map(|e| e.equity)
+        .unwrap_or(config.initial_capital);
     let total_return = final_equity - config.initial_capital;
     let total_return_pct = (total_return / config.initial_capital) * 100.0;
 
-    // Calculate win rate and PnL stats
     let (win_rate, avg_win, avg_loss) = calculate_trade_stats(&trades, &equity_curve);
-
-    // Calculate drawdown
     let (max_drawdown, max_drawdown_pct) = calculate_drawdown(&equity_curve, config.initial_capital);
-
-    // Calculate Sharpe and Sortino ratios
     let sharpe_ratio = calculate_sharpe_ratio(&equity_curve);
     let sortino_ratio = calculate_sortino_ratio(&equity_curve);
 
@@ -198,25 +145,6 @@ pub async fn simulate(
     })
 }
 
-fn get_indicator_values(
-    indicators: &HashMap<String, Box<dyn IndicatorEvaluator>>,
-) -> Result<HashMap<String, f64>> {
-    let mut values = HashMap::new();
-    for (id, evaluator) in indicators {
-        // Get the primary output value
-        if let Ok(val) = evaluator.value("value") {
-            values.insert(id.clone(), val);
-        }
-        // Also try common output names
-        for output in &["signal", "histogram", "upper", "lower", "middle"] {
-            if let Ok(val) = evaluator.value(output) {
-                values.insert(format!("{}.{}", id, output), val);
-            }
-        }
-    }
-    Ok(values)
-}
-
 fn create_order_from_strategy_action(
     action: &StrategyAction,
     candle: &Candle,
@@ -225,13 +153,23 @@ fn create_order_from_strategy_action(
 ) -> Result<Option<Order>> {
     let (side, sz) = match action {
         StrategyAction::Buy { size_pct } => {
-            let equity = portfolio.total_equity(&candle.coin, candle.close);
-            let sz = (equity * size_pct / 100.0) / candle.close;
+            let pos_size = portfolio.get_position(&candle.coin);
+            let sz = if pos_size < -1e-10 {
+                pos_size.abs() * size_pct / 100.0
+            } else {
+                let equity = portfolio.total_equity(&candle.coin, candle.close);
+                (equity * size_pct / 100.0) / candle.close
+            };
             (Side::Buy, sz)
         }
         StrategyAction::Sell { size_pct } => {
             let pos_size = portfolio.get_position(&candle.coin);
-            let sz = pos_size.abs() * size_pct / 100.0;
+            let sz = if pos_size > 1e-10 {
+                pos_size.abs() * size_pct / 100.0
+            } else {
+                let equity = portfolio.total_equity(&candle.coin, candle.close);
+                (equity * size_pct / 100.0) / candle.close
+            };
             (Side::Sell, sz)
         }
         StrategyAction::Close => {
@@ -243,6 +181,10 @@ fn create_order_from_strategy_action(
             (side, pos_size.abs())
         }
     };
+
+    if sz <= 0.0 || sz.is_nan() || sz.is_infinite() {
+        return Ok(None);
+    }
 
     Ok(Some(Order {
         id: order_id,
